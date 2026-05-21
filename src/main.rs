@@ -73,6 +73,7 @@ fn require_api_key() -> String {
 #[derive(Parser)]
 #[command(
     name = "regolo",
+    version,
     about = "Launch Claude Code with Regolo.ai models",
     after_help = "Examples:\n  regolo login\n  regolo claude --model brick-v1-beta\n  regolo list\n  regolo proxy\n  regolo logout"
 )]
