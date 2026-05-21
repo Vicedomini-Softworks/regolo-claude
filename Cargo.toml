@@ -1,16 +1,19 @@
 [package]
-name = "router_server"
+name = "regolo"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "router_server"
-path = "router_server.rs"
+name = "regolo"
+path = "src/main.rs"
 
 [dependencies]
 actix-web = "4"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+reqwest = { version = "0.11", features = ["json"] }
+rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
-dirs = "5"

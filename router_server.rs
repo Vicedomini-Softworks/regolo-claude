@@ -20,12 +20,47 @@ struct MessagesRequest {
     max_tokens: Option<u32>,
     #[serde(default)]
     temperature: Option<f32>,
+    #[serde(default)]
+    tools: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize, Debug)]
 struct ChatMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct OpenAiToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: OpenAiFunction,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct OpenAiFunction {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize, Debug)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: OpenAiFunctionDef,
+}
+
+#[derive(Serialize, Debug)]
+struct OpenAiFunctionDef {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
 }
 
 #[derive(Serialize, Debug)]
@@ -35,6 +70,8 @@ struct ChatCompletionRequest {
     max_tokens: u32,
     temperature: f32,
     stream: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<OpenAiTool>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -54,6 +91,20 @@ struct ChatChoice {
 struct ChatChoiceMessage {
     content: Option<String>,
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ResponseToolCall>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ResponseToolCall {
+    id: String,
+    function: ResponseFunction,
+}
+
+#[derive(Deserialize, Debug)]
+struct ResponseFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -70,17 +121,10 @@ struct AnthropicResponse {
     msg_type: String,
     role: String,
     model: String,
-    content: Vec<ContentBlock>,
+    content: Vec<serde_json::Value>,
     stop_reason: String,
     stop_sequence: Option<String>,
     usage: AnthropicUsage,
-}
-
-#[derive(Serialize)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    block_type: String,
-    text: String,
 }
 
 #[derive(Serialize)]
@@ -129,32 +173,139 @@ fn extract_text_content(value: &serde_json::Value) -> String {
 fn build_chat_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
     let mut messages: Vec<ChatMessage> = Vec::new();
 
-    // Prepend system prompt if present (Claude sends as top-level field)
     if let Some(system) = &req.system {
         let text = extract_text_content(system);
         if !text.is_empty() {
-            messages.push(ChatMessage { role: "system".to_string(), content: text });
+            messages.push(ChatMessage {
+                role: "system".to_string(),
+                content: Some(text),
+                tool_call_id: None,
+                tool_calls: None,
+            });
         }
     }
 
     for msg in &req.messages {
-        messages.push(ChatMessage {
-            role: msg.role.clone(),
-            content: extract_text_content(&msg.content),
-        });
+        if let Some(arr) = msg.content.as_array() {
+            // Check for tool_result blocks → emit as tool role messages
+            let tool_results: Vec<&serde_json::Value> = arr
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                .collect();
+            let other_blocks: Vec<&serde_json::Value> = arr
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) != Some("tool_result"))
+                .collect();
+
+            if !other_blocks.is_empty() {
+                let mut text_parts: Vec<String> = Vec::new();
+                let mut tool_calls: Vec<OpenAiToolCall> = Vec::new();
+                for block in &other_blocks {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                text_parts.push(t.to_string());
+                            }
+                        }
+                        Some("tool_use") => {
+                            let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                            tool_calls.push(OpenAiToolCall {
+                                id,
+                                call_type: "function".to_string(),
+                                function: OpenAiFunction {
+                                    name,
+                                    arguments: input.to_string(),
+                                },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                let content_str = text_parts.join("\n");
+                messages.push(ChatMessage {
+                    role: msg.role.clone(),
+                    content: if content_str.is_empty() { None } else { Some(content_str) },
+                    tool_call_id: None,
+                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                });
+            }
+
+            for tr in tool_results {
+                let tool_call_id = tr.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let content_val = tr.get("content");
+                let content_str = match content_val {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(v) => extract_text_content(v),
+                    None => String::new(),
+                };
+                messages.push(ChatMessage {
+                    role: "tool".to_string(),
+                    content: Some(content_str),
+                    tool_call_id: Some(tool_call_id),
+                    tool_calls: None,
+                });
+            }
+        } else {
+            messages.push(ChatMessage {
+                role: msg.role.clone(),
+                content: Some(extract_text_content(&msg.content)),
+                tool_call_id: None,
+                tool_calls: None,
+            });
+        }
     }
 
     messages
 }
 
+fn convert_tools(tools: &[serde_json::Value]) -> Vec<OpenAiTool> {
+    tools.iter().map(|t| OpenAiTool {
+        tool_type: "function".to_string(),
+        function: OpenAiFunctionDef {
+            name: t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            description: t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            parameters: t.get("input_schema").cloned()
+                .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
+        },
+    }).collect()
+}
+
 fn translate_chat_to_anthropic(resp: ChatCompletionResponse, model: &str) -> AnthropicResponse {
-    let text = resp.choices.first()
-        .map(|c| {
-            c.message.content.clone()
-                .or_else(|| c.message.reasoning_content.clone())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
+    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+    let mut stop_reason = "end_turn".to_string();
+
+    if let Some(choice) = resp.choices.first() {
+        let finish_reason = choice.finish_reason.as_deref().unwrap_or("stop");
+
+        let text = choice.message.content.clone()
+            .or_else(|| choice.message.reasoning_content.clone())
+            .unwrap_or_default();
+        if !text.is_empty() {
+            content_blocks.push(serde_json::json!({"type": "text", "text": text}));
+        }
+
+        if !choice.message.tool_calls.is_empty() {
+            stop_reason = "tool_use".to_string();
+            for tc in &choice.message.tool_calls {
+                let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(serde_json::json!({}));
+                content_blocks.push(serde_json::json!({
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": input,
+                }));
+            }
+        } else if finish_reason == "length" {
+            stop_reason = "max_tokens".to_string();
+        }
+    }
+
+    if content_blocks.is_empty() {
+        content_blocks.push(serde_json::json!({"type": "text", "text": ""}));
+    }
 
     let usage = resp.usage.unwrap_or(ChatUsage { prompt_tokens: 0, completion_tokens: 0 });
 
@@ -163,8 +314,8 @@ fn translate_chat_to_anthropic(resp: ChatCompletionResponse, model: &str) -> Ant
         msg_type: "message".to_string(),
         role: "assistant".to_string(),
         model: resp.model.unwrap_or_else(|| model.to_string()),
-        content: vec![ContentBlock { block_type: "text".to_string(), text }],
-        stop_reason: "end_turn".to_string(),
+        content: content_blocks,
+        stop_reason,
         stop_sequence: None,
         usage: AnthropicUsage {
             input_tokens: usage.prompt_tokens,
@@ -188,6 +339,7 @@ async fn handle_messages(req: web::Json<MessagesRequest>) -> HttpResponse {
         max_tokens: req.max_tokens.unwrap_or(4096),
         temperature: req.temperature.unwrap_or(0.7),
         stream: false,
+        tools: convert_tools(&req.tools),
     };
 
     let client = reqwest::Client::new();

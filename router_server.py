@@ -55,39 +55,142 @@ def check_api_key():
     sys.exit(1)
 
 
-def translate_messages_to_completion(messages: list[dict], model: str, extra_params: dict = None) -> dict:
+def convert_anthropic_tools_to_openai(tools: list) -> list:
+    """Convert Anthropic tool definitions to OpenAI function format."""
+    result = []
+    for tool in tools:
+        result.append({
+            "type": "function",
+            "function": {
+                "name": tool.get("name", ""),
+                "description": tool.get("description", ""),
+                "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+            }
+        })
+    return result
+
+
+def convert_messages_to_openai(messages: list) -> list:
+    """
+    Convert Anthropic message format to OpenAI format.
+    Handles tool_result content blocks → tool role messages.
+    Handles content arrays → string content.
+    """
+    result = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if isinstance(content, list):
+            tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+            other_blocks = [b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_result")]
+
+            # Emit assistant message for any text/tool_use blocks first
+            if other_blocks:
+                text_parts = []
+                tool_calls = []
+                for block in other_blocks:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "tool_use":
+                            tool_calls.append({
+                                "id": block.get("id", f"call_{os.urandom(4).hex()}"),
+                                "type": "function",
+                                "function": {
+                                    "name": block.get("name", ""),
+                                    "arguments": json.dumps(block.get("input", {})),
+                                }
+                            })
+                        else:
+                            text_parts.append(str(block))
+                    else:
+                        text_parts.append(str(block))
+                msg_out = {"role": role, "content": "\n".join(text_parts) or None}
+                if tool_calls:
+                    msg_out["tool_calls"] = tool_calls
+                result.append(msg_out)
+
+            # Emit tool result messages
+            for tr in tool_results:
+                tr_content = tr.get("content", "")
+                if isinstance(tr_content, list):
+                    tr_content = "\n".join(
+                        b.get("text", str(b)) if isinstance(b, dict) else str(b)
+                        for b in tr_content
+                    )
+                result.append({
+                    "role": "tool",
+                    "tool_call_id": tr.get("tool_use_id", ""),
+                    "content": str(tr_content) if tr_content is not None else "",
+                })
+        else:
+            result.append({"role": role, "content": content})
+
+    return result
+
+
+def translate_messages_to_completion(messages: list[dict], model: str, extra_params: dict = None, tools: list = None) -> dict:
     """
     Translate Claude's /v1/messages format to Regolo's /v1/chat/completions format.
-    Pass through any extra parameters (like reasoning_effort) from Claude.
     """
     result = {
         "model": model,
-        "messages": messages,
+        "messages": convert_messages_to_openai(messages),
         "max_tokens": extra_params.get("max_tokens", 4096) if extra_params else 4096,
         "temperature": extra_params.get("temperature", 0.7) if extra_params else 0.7,
         "stream": False,
     }
 
+    if tools:
+        result["tools"] = convert_anthropic_tools_to_openai(tools)
+        result["tool_choice"] = "auto"
+
     if extra_params:
         for key in ["reasoning_effort", "top_p", "stop", "seed"]:
             if key in extra_params:
                 result[key] = extra_params[key]
-    
+
     return result
 
 
 def translate_completion_to_messages(completion_response: dict, model: str = "") -> dict:
     """
     Translate Regolo's chat completion response to Anthropic Messages API format.
-    Claude Code expects this format, not OpenAI chat completion format.
+    Handles both text responses and tool_calls.
     """
-    content = ""
+    content_blocks = []
+    stop_reason = "end_turn"
 
     if "choices" in completion_response and completion_response["choices"]:
-        msg = completion_response["choices"][0].get("message", {})
-        content = msg.get("content") or msg.get("reasoning_content") or ""
-        if not isinstance(content, str):
-            content = str(content) if content else ""
+        choice = completion_response["choices"][0]
+        msg = choice.get("message", {})
+        finish_reason = choice.get("finish_reason", "stop")
+
+        text = msg.get("content") or msg.get("reasoning_content") or ""
+        if text and isinstance(text, str):
+            content_blocks.append({"type": "text", "text": text})
+
+        tool_calls = msg.get("tool_calls", [])
+        if tool_calls:
+            stop_reason = "tool_use"
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                try:
+                    input_data = json.loads(fn.get("arguments", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    input_data = {}
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", f"toolu_{os.urandom(4).hex()}"),
+                    "name": fn.get("name", ""),
+                    "input": input_data,
+                })
+        elif finish_reason == "length":
+            stop_reason = "max_tokens"
+
+    if not content_blocks:
+        content_blocks.append({"type": "text", "text": ""})
 
     usage = completion_response.get("usage", {})
     return {
@@ -95,8 +198,8 @@ def translate_completion_to_messages(completion_response: dict, model: str = "")
         "type": "message",
         "role": "assistant",
         "model": completion_response.get("model", model or "unknown"),
-        "content": [{"type": "text", "text": content}],
-        "stop_reason": "end_turn",
+        "content": content_blocks,
+        "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
@@ -138,17 +241,20 @@ async def handle_messages(request: web.Request) -> web.Response:
     for key in ["reasoning_effort", "top_p", "stop", "seed", "max_tokens", "temperature"]:
         if key in data:
             extra_params[key] = data[key]
-    
+
+    tools = data.get("tools", [])
+
     if DEBUG:
         print(f"[DEBUG] Extra params: {extra_params}", flush=True)
-    
+        print(f"[DEBUG] Tools: {len(tools)} defined", flush=True)
+
     if not messages:
         return web.json_response(
-            {"error": "No messages provided"}, 
+            {"error": "No messages provided"},
             status=HTTPStatus.BAD_REQUEST
         )
-    
-    completion_data = translate_messages_to_completion(messages, model, extra_params)
+
+    completion_data = translate_messages_to_completion(messages, model, extra_params, tools)
     
     if DEBUG:
         print(f"[DEBUG] Sending to Regolo:", flush=True)
