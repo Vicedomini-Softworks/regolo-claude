@@ -122,12 +122,18 @@ def list_models():
     api_key = check_api_key()
     
     try:
+        import ssl
         import urllib.request
+        try:
+            import certifi
+            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            ssl_ctx = ssl.create_default_context()
         req = urllib.request.Request(
             f"{REGOLO_BASE_URL}/models",
             headers={"Authorization": f"Bearer {api_key}"}
         )
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, context=ssl_ctx) as response:
             data = json.loads(response.read().decode())
             print("Available Regolo models:")
             for model in data.get("data", []):
