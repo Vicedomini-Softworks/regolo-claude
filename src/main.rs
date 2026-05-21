@@ -1,7 +1,8 @@
 use actix_web::{get, post, web, App, HttpResponse, HttpServer};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::PathBuf, process, sync::mpsc, thread};
+use std::{env, fs, path::PathBuf, process, sync::mpsc, thread, time::Instant};
+use tracing::{error, info, warn};
 
 const REGOLO_API_BASE: &str = "https://api.regolo.ai";
 
@@ -232,6 +233,13 @@ struct AnthropicUsage {
     output_tokens: u32,
 }
 
+// ── Shared app state ──────────────────────────────────────────────────────────
+
+struct AppState {
+    client: reqwest::Client,
+    api_key: String,
+}
+
 // ── Proxy logic ───────────────────────────────────────────────────────────────
 
 fn extract_text(value: &serde_json::Value) -> String {
@@ -284,13 +292,25 @@ fn build_chat_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                             }
                         }
                         Some("tool_use") => {
-                            let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                            let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                            let id = block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let input =
+                                block.get("input").cloned().unwrap_or(serde_json::json!({}));
                             tool_calls.push(OaiToolCall {
                                 id,
                                 call_type: "function".to_string(),
-                                function: OaiFunction { name, arguments: input.to_string() },
+                                function: OaiFunction {
+                                    name,
+                                    arguments: input.to_string(),
+                                },
                             });
                         }
                         _ => {}
@@ -299,14 +319,26 @@ fn build_chat_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                 let content_str = text_parts.join("\n");
                 out.push(ChatMessage {
                     role: msg.role.clone(),
-                    content: if content_str.is_empty() { None } else { Some(content_str) },
+                    content: if content_str.is_empty() {
+                        None
+                    } else {
+                        Some(content_str)
+                    },
                     tool_call_id: None,
-                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
                 });
             }
 
             for tr in tool_results {
-                let tool_call_id = tr.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let tool_call_id = tr
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let content_str = match tr.get("content") {
                     Some(serde_json::Value::String(s)) => s.clone(),
                     Some(v) => extract_text(v),
@@ -338,8 +370,16 @@ fn convert_tools(tools: &[serde_json::Value]) -> Vec<OaiTool> {
         .map(|t| OaiTool {
             tool_type: "function".to_string(),
             function: OaiFunctionDef {
-                name: t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                description: t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                name: t
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                description: t
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 parameters: t
                     .get("input_schema")
                     .cloned()
@@ -369,8 +409,8 @@ fn translate_to_anthropic(resp: ChatCompletionResponse, model: &str) -> Anthropi
         if !choice.message.tool_calls.is_empty() {
             stop_reason = "tool_use".to_string();
             for tc in &choice.message.tool_calls {
-                let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::json!({}));
+                let input: serde_json::Value =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
                 content_blocks.push(serde_json::json!({
                     "type": "tool_use",
                     "id": tc.id,
@@ -410,15 +450,18 @@ fn translate_to_anthropic(resp: ChatCompletionResponse, model: &str) -> Anthropi
 // ── Actix handlers ────────────────────────────────────────────────────────────
 
 #[post("/v1/messages")]
-async fn handle_messages(req: web::Json<MessagesRequest>) -> HttpResponse {
-    let api_key = match load_api_key() {
-        Some(k) => k,
-        None => {
-            return HttpResponse::Unauthorized()
-                .json(serde_json::json!({"error": "REGOLO_API_KEY not found"}))
-        }
-    };
+async fn handle_messages(
+    state: web::Data<AppState>,
+    req: web::Json<MessagesRequest>,
+) -> HttpResponse {
+    let request_start = Instant::now();
+    let model = req.model.clone();
+    let msg_count = req.messages.len();
+    let tool_count = req.tools.len();
 
+    info!(model = %model, messages = msg_count, tools = tool_count, "→ /v1/messages");
+
+    let t_build = Instant::now();
     let has_tools = !req.tools.is_empty();
     let chat_req = ChatCompletionRequest {
         model: req.model.clone(),
@@ -427,67 +470,87 @@ async fn handle_messages(req: web::Json<MessagesRequest>) -> HttpResponse {
         temperature: req.temperature.unwrap_or(0.7),
         stream: false,
         tools: convert_tools(&req.tools),
-        tool_choice: if has_tools { Some("auto".to_string()) } else { None },
+        tool_choice: if has_tools {
+            Some("auto".to_string())
+        } else {
+            None
+        },
     };
+    info!(elapsed_ms = t_build.elapsed().as_millis(), "build_chat_messages");
 
-    let client = reqwest::Client::new();
-    match client
+    let t_upstream = Instant::now();
+    match state.client
         .post(format!("{}/v1/chat/completions", REGOLO_API_BASE))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Authorization", format!("Bearer {}", state.api_key))
         .json(&chat_req)
         .send()
         .await
     {
         Ok(response) => {
+            let upstream_ms = t_upstream.elapsed().as_millis();
             let status = response.status();
+            info!(status = status.as_u16(), upstream_ms, "← upstream responded");
+
             if status.is_success() {
+                let t_parse = Instant::now();
                 match response.json::<ChatCompletionResponse>().await {
                     Ok(chat_resp) => {
-                        HttpResponse::Ok().json(translate_to_anthropic(chat_resp, &req.model))
+                        info!(elapsed_ms = t_parse.elapsed().as_millis(), "parse response");
+                        let anthropic_resp = translate_to_anthropic(chat_resp, &model);
+                        info!(
+                            total_ms = request_start.elapsed().as_millis(),
+                            stop_reason = %anthropic_resp.stop_reason,
+                            "✓ request complete"
+                        );
+                        HttpResponse::Ok().json(anthropic_resp)
                     }
-                    Err(e) => HttpResponse::InternalServerError()
-                        .json(serde_json::json!({"error": format!("Failed to parse response: {}", e)})),
+                    Err(e) => {
+                        error!(error = %e, "failed to parse upstream response");
+                        HttpResponse::InternalServerError().json(
+                            serde_json::json!({"error": format!("Failed to parse response: {}", e)}),
+                        )
+                    }
                 }
             } else {
                 let body = response.text().await.unwrap_or_default();
+                warn!(status = status.as_u16(), body = %body, "upstream error");
                 HttpResponse::build(status).json(serde_json::json!({
                     "error": format!("Regolo API error: {}", status.as_u16()),
                     "details": body
                 }))
             }
         }
-        Err(e) => HttpResponse::InternalServerError()
-            .json(serde_json::json!({"error": format!("Proxy error: {}", e)})),
+        Err(e) => {
+            error!(error = %e, elapsed_ms = t_upstream.elapsed().as_millis(), "upstream request failed");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("Proxy error: {}", e)}))
+        }
     }
 }
 
 #[get("/v1/models")]
-async fn handle_models() -> HttpResponse {
-    let api_key = match load_api_key() {
-        Some(k) => k,
-        None => {
-            return HttpResponse::Unauthorized()
-                .json(serde_json::json!({"error": "REGOLO_API_KEY not found"}))
-        }
-    };
-
-    let client = reqwest::Client::new();
-    match client
+async fn handle_models(state: web::Data<AppState>) -> HttpResponse {
+    let t = Instant::now();
+    match state.client
         .get(format!("{}/models", REGOLO_API_BASE))
-        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Authorization", format!("Bearer {}", state.api_key))
         .send()
         .await
     {
         Ok(response) => {
             let status = response.status();
+            info!(status = status.as_u16(), elapsed_ms = t.elapsed().as_millis(), "GET /models");
             match response.text().await {
                 Ok(body) => HttpResponse::build(status).body(body),
                 Err(e) => HttpResponse::InternalServerError()
                     .json(serde_json::json!({"error": format!("Failed to read response: {}", e)})),
             }
         }
-        Err(e) => HttpResponse::InternalServerError()
-            .json(serde_json::json!({"error": format!("Failed to fetch models: {}", e)})),
+        Err(e) => {
+            error!(error = %e, "GET /models failed");
+            HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("Failed to fetch models: {}", e)}))
+        }
     }
 }
 
@@ -503,10 +566,29 @@ async fn handle_root() -> HttpResponse {
 
 // ── Proxy server runner ───────────────────────────────────────────────────────
 
+fn make_app_state(api_key: String) -> web::Data<AppState> {
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(32)
+        .tcp_keepalive(std::time::Duration::from_secs(90))
+        .build()
+        .expect("failed to build reqwest client");
+    web::Data::new(AppState { client, api_key })
+}
+
 fn run_proxy(port: u16) -> std::io::Result<()> {
+    let api_key = match load_api_key() {
+        Some(k) => k,
+        None => {
+            eprintln!("Error: REGOLO_API_KEY not found. Run 'regolo login' first.");
+            std::process::exit(1);
+        }
+    };
+
     actix_web::rt::System::new().block_on(async move {
-        let bound = HttpServer::new(|| {
+        let state = make_app_state(api_key);
+        let bound = HttpServer::new(move || {
             App::new()
+                .app_data(state.clone())
                 .service(handle_messages)
                 .service(handle_models)
                 .service(handle_health)
@@ -526,6 +608,7 @@ fn run_proxy(port: u16) -> std::io::Result<()> {
             "  ANTHROPIC_BASE_URL=http://localhost:{} ANTHROPIC_API_KEY=<key> claude",
             actual_port
         );
+        println!("  (set RUST_LOG=info for timing logs)");
         println!();
 
         bound.run().await
@@ -533,13 +616,15 @@ fn run_proxy(port: u16) -> std::io::Result<()> {
 }
 
 /// Spawn proxy in a background thread and return the port it bound to.
-fn spawn_proxy(port: u16) -> u16 {
+fn spawn_proxy(port: u16, api_key: String) -> u16 {
     let (tx, rx) = mpsc::channel::<u16>();
 
     thread::spawn(move || {
         actix_web::rt::System::new().block_on(async move {
-            let bound = HttpServer::new(|| {
+            let state = make_app_state(api_key);
+            let bound = HttpServer::new(move || {
                 App::new()
+                    .app_data(state.clone())
                     .service(handle_messages)
                     .service(handle_models)
                     .service(handle_health)
@@ -563,13 +648,12 @@ fn cmd_login() {
     println!("Regolo.ai API Login");
     println!("{}", "-".repeat(40));
 
-    let key = rpassword::prompt_password("Enter your Regolo API key: ")
-        .unwrap_or_else(|_| {
-            eprint!("Enter your Regolo API key: ");
-            let mut buf = String::new();
-            std::io::stdin().read_line(&mut buf).ok();
-            buf
-        });
+    let key = rpassword::prompt_password("Enter your Regolo API key: ").unwrap_or_else(|_| {
+        eprint!("Enter your Regolo API key: ");
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf).ok();
+        buf
+    });
     let key = key.trim().to_string();
 
     if key.is_empty() {
@@ -627,7 +711,7 @@ fn cmd_claude(model: &str) {
     let api_key = require_api_key();
 
     println!("Starting proxy server...");
-    let port = spawn_proxy(0);
+    let port = spawn_proxy(0, api_key.clone());
     println!("Proxy ready at http://localhost:{}", port);
     println!("Launching Claude Code with model: {}", model);
     println!("{}", "-".repeat(50));
@@ -655,6 +739,13 @@ fn cmd_claude(model: &str) {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
     let cli = Cli::parse();
     match cli.command {
         Commands::Login => cmd_login(),

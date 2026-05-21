@@ -1,5 +1,8 @@
 # Regolo Claude CLI
 
+[![CI](https://github.com/Vicedomini-Softworks/regolo-claude/actions/workflows/ci.yml/badge.svg)](https://github.com/Vicedomini-Softworks/regolo-claude/actions/workflows/ci.yml)
+[![Latest](https://img.shields.io/github/v/tag/Vicedomini-Softworks/regolo-claude?label=latest&style=plastic)](https://github.com/Vicedomini-Softworks/regolo-claude/releases/tag/v0.1.0)
+
 Single Rust binary that launches Claude Code with Regolo.ai models. Includes a built-in proxy that translates between Anthropic's Messages API (what Claude Code speaks) and Regolo's OpenAI-compatible Chat Completions API.
 
 ## Installation
