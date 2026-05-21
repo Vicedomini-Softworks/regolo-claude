@@ -498,24 +498,23 @@ async fn handle_health() -> HttpResponse {
 
 #[get("/")]
 async fn handle_root() -> HttpResponse {
-    handle_health().await
+    HttpResponse::Ok().json(serde_json::json!({"status": "ok", "service": "regolo-messages-proxy"}))
 }
 
 // ── Proxy server runner ───────────────────────────────────────────────────────
 
 fn run_proxy(port: u16) -> std::io::Result<()> {
     actix_web::rt::System::new().block_on(async move {
-        let server = HttpServer::new(|| {
+        let bound = HttpServer::new(|| {
             App::new()
                 .service(handle_messages)
                 .service(handle_models)
                 .service(handle_health)
                 .service(handle_root)
         })
-        .bind(format!("0.0.0.0:{}", port))?
-        .run();
+        .bind(format!("0.0.0.0:{}", port))?;
 
-        let actual_port = server.addrs()[0].port();
+        let actual_port = bound.addrs()[0].port();
         println!("Starting Regolo Messages Proxy on port {}", actual_port);
         println!("Regolo API: {}", REGOLO_API_BASE);
         println!("\nEndpoints:");
@@ -529,7 +528,7 @@ fn run_proxy(port: u16) -> std::io::Result<()> {
         );
         println!();
 
-        server.await
+        bound.run().await
     })
 }
 
@@ -539,7 +538,7 @@ fn spawn_proxy(port: u16) -> u16 {
 
     thread::spawn(move || {
         actix_web::rt::System::new().block_on(async move {
-            let server = HttpServer::new(|| {
+            let bound = HttpServer::new(|| {
                 App::new()
                     .service(handle_messages)
                     .service(handle_models)
@@ -547,12 +546,11 @@ fn spawn_proxy(port: u16) -> u16 {
                     .service(handle_root)
             })
             .bind(format!("0.0.0.0:{}", port))
-            .expect("Failed to bind proxy port")
-            .run();
+            .expect("Failed to bind proxy port");
 
-            let actual_port = server.addrs()[0].port();
+            let actual_port = bound.addrs()[0].port();
             tx.send(actual_port).ok();
-            server.await.ok();
+            bound.run().await.ok();
         });
     });
 
