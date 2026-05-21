@@ -1,97 +1,96 @@
 # Regolo Claude CLI
 
-CLI wrapper that launches Claude Code with Regolo.ai models via OpenAI-compatible API.
+Single Rust binary that launches Claude Code with Regolo.ai models. Includes a built-in proxy that translates between Anthropic's Messages API (what Claude Code speaks) and Regolo's OpenAI-compatible Chat Completions API.
 
 ## Installation
 
+### From release (recommended)
+
+Download the binary for your platform from [Releases](https://github.com/Vicedomini-Softworks/regolo-claude/releases), then:
+
 ```bash
-./install.sh
-pip install -r requirements.txt
+tar xzf regolo-<target>.tar.gz
+install -m 755 regolo-<target> /usr/local/bin/regolo
+```
+
+### Build from source
+
+```bash
+cargo build --release
+# or
+make install
+```
+
+Requires Rust stable. Claude Code must be installed separately:
+
+```bash
+npm install -g @anthropic-ai/claude-code
 ```
 
 ## Authentication
 
 ```bash
-regolo login      # Enter API key (stored in ~/.regolo/auth.json)
-regolo logout     # Remove stored API key
+regolo login    # prompts for API key, stores in ~/.regolo/auth.json
+regolo logout   # removes stored key
 ```
+
+Or set `REGOLO_API_KEY` in your environment to skip the file entirely.
 
 ## Usage
 
-### List Available Models
-
 ```bash
-regolo list
+regolo claude                        # launch Claude Code (default model: brick-v1-beta)
+regolo claude --model qwen3:32B      # specify model
+regolo list                          # list available Regolo models
+regolo proxy                         # start proxy in foreground (port 0 = random)
+regolo proxy --port 8789             # start proxy on fixed port
 ```
 
-### Launch Claude Directly (v1/completion API)
+`regolo claude` automatically starts the proxy in the background, wires up the env vars, and launches `claude`. No manual proxy management needed.
 
-```bash
-regolo claude --model=brick-v1-beta
+## How it works
+
+```
+Claude Code  →  POST /v1/messages (Anthropic format)
+                ↓
+            regolo proxy
+                ↓
+            POST /v1/chat/completions (OpenAI format)
+                ↓
+            api.regolo.ai
 ```
 
-### Launch Claude with Messages API Proxy (Recommended)
-
-Since Regolo only supports `/v1/completion` but Claude expects `/v1/messages`, use the proxy:
-
-```bash
-# Terminal 1: Start the proxy server
-regolo proxy
-
-# Terminal 2: Launch Claude
-regolo claude --model=brick-v1-beta
-```
-
-Or manually:
-
-```bash
-# Terminal 1
-python router_server.py
-
-# Terminal 2
-ANTHROPIC_BASE_URL=http://localhost:8789 ANTHROPIC_API_KEY=your_key claude
-```
-
-## Proxy Server
-
-The `router_server.py` translates between:
-- **Claude's format**: `/v1/messages` (chat-based)
-- **Regolo's format**: `/v1/completion` (prompt-based)
-
-### Proxy Endpoints
-
-- `POST /v1/messages` - Translated to `/v1/completion`
-- `GET /v1/models` - Forwarded to Regolo
-- `GET /health` - Health check
+The proxy handles:
+- Anthropic `tools` / `tool_use` / `tool_result` ↔ OpenAI `tools` / `tool_calls` / `tool` role
+- `system` top-level field → system message
+- Response translated back to Anthropic Messages API format (`type: message`, `stop_reason`, etc.)
 
 ## Environment Variables
 
-- `REGOLO_API_KEY` - Your Regolo API key (optional, can use `regolo login`)
-- `PORT` - Proxy server port (default: 8789)
+| Variable | Description |
+|---|---|
+| `REGOLO_API_KEY` | API key (overrides `~/.regolo/auth.json`) |
+| `DEBUG` | Set to `1` to log full request/response to stdout |
 
 ## Models
 
 Default: `brick-v1-beta`
 
-Other options: `qwen3.5:122B`, `qwen3.5:72B`, `qwen3:32B`, `qwen3:14B`, `qwen3:8B`
+Run `regolo list` to see all available models.
 
-## Prerequisites
+## Development
 
-1. Python 3.9+
-2. `keyring` package (for secure credential storage)
-3. `aiohttp` package (for proxy server)
-4. Claude Code installed globally: `npm install -g @anthropic-ai/claude-code`
-
-## Troubleshooting
-
-### 403 Errors
-Usually caused by wrong BASE_URL. Should be `https://api.regolo.ai`, not `https://api.regolo.ai/v1`
-
-### Authentication Errors
-Check API key is valid via `regolo login` or `export REGOLO_API_KEY=...`
-
-### Proxy Connection Errors
-Ensure the proxy server is running before launching Claude:
 ```bash
-regolo proxy
+make build    # debug build
+make release  # release build
+make test     # run tests
+make fmt      # format
+make lint     # clippy
+make install  # install to /usr/local/bin
 ```
+
+CI runs on every push to `main`. Tagged releases (`v*`) build binaries for:
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
