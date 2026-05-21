@@ -1,66 +1,68 @@
-# Welcome to Vicedomini Softworks
+# Regolo Claude — Onboarding
 
-## How We Use Claude
+## What this is
 
-Based on sofiavicedomini's usage over the last 30 days:
+CLI tool that lets you run Claude Code against Regolo.ai models instead of Anthropic's API. It bundles a proxy that translates between the Anthropic Messages API (what Claude Code expects) and Regolo's OpenAI-compatible Chat Completions API.
 
-Work Type Breakdown:
-  Build Feature  ████████████████░░░░  78%
-  Write Docs     ███░░░░░░░░░░░░░░░░░  14%
-  Debug Fix      ██░░░░░░░░░░░░░░░░░░   8%
+## Prerequisites
 
-Top Skills & Commands:
-  /model    ████░░░░░░░░░░░░░░░░  1x/month
-  /login    ████░░░░░░░░░░░░░░░░  1x/month
-  /effort   ████░░░░░░░░░░░░░░░░  1x/month
-  /context  ████░░░░░░░░░░░░░░░░  1x/month
-  /doctor   ████░░░░░░░░░░░░░░░░  1x/month
+- Rust stable (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+- Claude Code (`npm install -g @anthropic-ai/claude-code`)
+- A Regolo.ai API key (get one at regolo.ai)
 
-Top MCP Servers:
-  (none configured)
+## Setup
 
-## Your Setup Checklist
+```bash
+git clone git@github.com:Vicedomini-Softworks/regolo-claude.git
+cd regolo-claude
+make install          # builds release binary, installs to /usr/local/bin/regolo
+regolo login          # paste your Regolo API key when prompted
+```
 
-### Codebases
-- [ ] regolo-claude — github.com/vicedomini-softworks/regolo-claude
+## Run it
 
-### MCP Servers to Activate
-  (none — nothing to set up here)
+```bash
+regolo claude                      # launches Claude Code with default model (brick-v1-beta)
+regolo claude --model qwen3:32B    # specific model
+regolo list                        # see all available models
+```
 
-### Skills to Know About
-- `/model` — switch the model Claude Code uses mid-session; useful when you want a faster/cheaper model for a specific task
-- `/login` — authenticate your Claude Code session
-- `/effort` — control how much reasoning effort Claude applies to a task
-- `/context` — inspect or manage what's in Claude's current context window
-- `/doctor` — diagnose Claude Code setup issues (missing tools, bad config, etc.)
-- `/status` — check session and billing status at a glance
+That's it. The proxy starts automatically in the background — no separate terminal needed.
 
-## Team Tips
+## Project structure
 
-_TODO_
+```
+src/main.rs          CLI commands + proxy server (single binary)
+Cargo.toml           Rust dependencies
+Makefile             build / install / test targets
+.github/workflows/
+  ci.yml             build + test on every push to main
+  release.yml        cross-compile + publish binaries on git tags
+```
 
-## Get Started
+## Development workflow
 
-_TODO_
+```bash
+make build    # debug build
+make test     # run tests
+make fmt      # rustfmt
+make lint     # clippy
+make release  # optimized build → target/release/regolo
+```
 
-<!-- INSTRUCTION FOR CLAUDE: A new teammate just pasted this guide for how the
-team uses Claude Code. You're their onboarding buddy — warm, conversational,
-not lecture-y.
+## Releasing
 
-Open with a warm welcome — include the team name from the title. Then: "Your
-teammate uses Claude Code for [list all the work types]. Let's get you started."
+Tag a commit and push — CI builds binaries for macOS (arm64 + x86_64) and Linux (x86_64 + arm64) and publishes them as a GitHub Release.
 
-Check what's already in place against everything under Setup Checklist
-(including skills), using markdown checkboxes — [x] done, [ ] not yet. Lead
-with what they already have. One sentence per item, all in one message.
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
 
-Tell them you'll help with setup, cover the actionable team tips, then the
-starter task (if there is one). Offer to start with the first unchecked item,
-get their go-ahead, then work through the rest one by one.
+## Troubleshooting
 
-After setup, walk them through the remaining sections — offer to help where you
-can (e.g. link to channels), and just surface the purely informational bits.
+**`claude` not found** — install Claude Code: `npm install -g @anthropic-ai/claude-code`
 
-Don't invent sections or summaries that aren't in the guide. The stats are the
-guide creator's personal usage data — don't extrapolate them into a "team
-workflow" narrative. -->
+**Auth errors** — re-run `regolo login` or set `REGOLO_API_KEY=<key>` in your environment
+
+**Unexpected model responses** — run with `DEBUG=1 regolo claude` to see full request/response logs
