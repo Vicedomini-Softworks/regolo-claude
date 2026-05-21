@@ -476,10 +476,14 @@ async fn handle_messages(
             None
         },
     };
-    info!(elapsed_ms = t_build.elapsed().as_millis(), "build_chat_messages");
+    info!(
+        elapsed_ms = t_build.elapsed().as_millis(),
+        "build_chat_messages"
+    );
 
     let t_upstream = Instant::now();
-    match state.client
+    match state
+        .client
         .post(format!("{}/v1/chat/completions", REGOLO_API_BASE))
         .header("Authorization", format!("Bearer {}", state.api_key))
         .json(&chat_req)
@@ -489,7 +493,10 @@ async fn handle_messages(
         Ok(response) => {
             let upstream_ms = t_upstream.elapsed().as_millis();
             let status = response.status();
-            info!(status = status.as_u16(), upstream_ms, "← upstream responded");
+            info!(
+                status = status.as_u16(),
+                upstream_ms, "← upstream responded"
+            );
 
             if status.is_success() {
                 let t_parse = Instant::now();
@@ -531,7 +538,8 @@ async fn handle_messages(
 #[get("/v1/models")]
 async fn handle_models(state: web::Data<AppState>) -> HttpResponse {
     let t = Instant::now();
-    match state.client
+    match state
+        .client
         .get(format!("{}/models", REGOLO_API_BASE))
         .header("Authorization", format!("Bearer {}", state.api_key))
         .send()
@@ -539,7 +547,11 @@ async fn handle_models(state: web::Data<AppState>) -> HttpResponse {
     {
         Ok(response) => {
             let status = response.status();
-            info!(status = status.as_u16(), elapsed_ms = t.elapsed().as_millis(), "GET /models");
+            info!(
+                status = status.as_u16(),
+                elapsed_ms = t.elapsed().as_millis(),
+                "GET /models"
+            );
             match response.text().await {
                 Ok(body) => HttpResponse::build(status).body(body),
                 Err(e) => HttpResponse::InternalServerError()
