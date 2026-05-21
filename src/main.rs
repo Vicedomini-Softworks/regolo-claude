@@ -94,6 +94,8 @@ enum Commands {
     Claude {
         #[arg(short, long, default_value = "brick-v1-beta", help = "Model to use")]
         model: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, help = "Arguments to pass to Claude Code")]
+        args: Vec<String>,
     },
     /// Start the messages proxy server in foreground
     Proxy {
@@ -720,7 +722,7 @@ fn cmd_list() {
     });
 }
 
-fn cmd_claude(model: &str) {
+fn cmd_claude(model: &str, args: &[String]) {
     let api_key = require_api_key();
 
     println!("Starting proxy server...");
@@ -729,7 +731,10 @@ fn cmd_claude(model: &str) {
     println!("Launching Claude Code with model: {}", model);
     println!("{}", "-".repeat(50));
 
+    let cmd_args = args.to_vec();
+
     let status = process::Command::new("claude")
+        .args(&cmd_args)
         .env("ANTHROPIC_API_KEY", &api_key)
         .env("ANTHROPIC_MODEL", model)
         .env("ANTHROPIC_BASE_URL", format!("http://localhost:{}", port))
@@ -764,7 +769,7 @@ fn main() {
         Commands::Login => cmd_login(),
         Commands::Logout => cmd_logout(),
         Commands::List => cmd_list(),
-        Commands::Claude { model } => cmd_claude(&model),
+        Commands::Claude { model, args } => cmd_claude(&model, &args),
         Commands::Proxy { port } => {
             if let Err(e) = run_proxy(port) {
                 eprintln!("Proxy error: {}", e);
