@@ -31,7 +31,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: fmt
-        run: make fmt -- --check
+        run: make fmt-check
 
       - name: lint
         run: make lint
